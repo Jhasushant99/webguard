@@ -1,0 +1,20 @@
+{
+  "TARGET_URL"       : "https://vedas.sac.gov.in/en/",
+  "TARGET_SELECTOR"  : "body",
+  "MAX_PAGES"        : 50,
+  "HEADLESS"         : true,
+  "PAGE_LOAD_WAIT"   : 15,
+
+  "BLACKLIST_EXTENSIONS": [
+    ".pdf", ".zip", ".exe", ".docx", ".xlsx", ".pptx",
+    ".rar", ".tar", ".gz", ".mp3", ".mp4", ".avi",
+    ".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico",
+    ".css", ".js", ".xml", ".json"
+  ],
+
+  "BLACKLIST_PATTERNS": [
+    "logout", "signout", "login", "signin",
+    "download", "print", "share", "mailto",
+    "#", "javascript:"
+  ]
+}
