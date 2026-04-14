@@ -65,3 +65,28 @@ while stack:
 | `dom/home_last.json` | Last-seen content (used for comparison) |
 | `diffs/diff_001_home_TIMESTAMP.txt` | What changed (added/removed lines) |
 | `reports/report_TIMESTAMP.html` | Full crawl summary report |
+
+# Original crawl (unchanged)
+python main.py
+python main.py --mode screenshot --max 20
+
+# YUVA: Single layer screenshots (default yuva mode)
+python main.py --mode yuva
+
+# YUVA: Everything — discover + single + combined + random + freshness
+python main.py --mode yuva --all
+
+# YUVA: Random layers — pick 4 random layers, 10 iterations
+python main.py --mode yuva --random 4 --iterations 10
+
+# YUVA: Combined category screenshots
+python main.py --mode yuva --combined
+
+# YUVA: Only check data freshness (10-day threshold)
+python main.py --mode yuva --freshness
+
+# YUVA: Custom freshness threshold (7 days)
+python main.py --mode yuva --freshness --threshold 7
+
+# YUVA: Longer page load wait (slow connection)
+python main.py --mode yuva --wait 45
