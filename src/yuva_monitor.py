@@ -1,11 +1,13 @@
 """
-WebGuard — YUVA Monitor (Final: Adds Layers & Clean Images)
-============================================================
-✔ Opens dialog, clicks layer, handles Date/Pass sub-popups
-✔ Clicks "OK/Add" so data actually renders on OpenLayers
-✔ Takes screenshot of ONLY the map canvas (clean images)
-✔ Checks > 10 days data freshness
-✔ Single / Combined / Random / Freshness
+WebGuard — YUVA Monitor (Full Debug Version)
+=============================================
+Built for: https://vedas.sac.gov.in/uva/index.html#app_id=visualization
+✔ Waits for Angular to render dialog list items
+✔ Safely expands categories (won't collapse if already open)
+✔ 3-tier layer clicking (Exact JS -> Loose JS -> Selenium)
+✔ Handles mat-select Date dropdowns
+✔ Clicks Data Tool + Map -> Pauses -> Takes Full Screenshot
+✔ Saves Paired .png Image + .json Data File
 """
 
 import time
@@ -13,7 +15,6 @@ import random
 import json
 import re
 import hashlib
-import base64
 from pathlib import Path
 from typing import List, Optional, Tuple
 from datetime import datetime
@@ -22,7 +23,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
 
 from src.utils import load_config
 
@@ -47,252 +47,275 @@ class YuvaMonitor:
     def __init__(self, driver, output_base="snapshots"):
         self.driver = driver
         self.cfg = load_config("config.json")
-
         self.output_base = Path(output_base)
-        for sub in ["single", "combined", "random", "yuva_json", "freshness"]:
+        
+        for sub in ["yuva_output"]:
             (self.output_base / sub).mkdir(parents=True, exist_ok=True)
 
         self.discovered_layers = []
         self._hash_cache = {}
 
     # ─────────────────────────────────────────────
-    # NAVIGATION
+    # 1. NAVIGATION
     # ─────────────────────────────────────────────
     def navigate(self, wait_time=None):
-        wait = wait_time or 20
-        print(f"\n🌐 Opening VEDAS YUVA...")
-        self.driver.get(self.cfg.get("TARGET_URL", "https://vedas.sac.gov.in/uva/index.html"))
+        wait = wait_time or 25
+        print(f"\n🌐 Opening VEDAS UVA...")
+        self.driver.get(self.cfg.get("TARGET_URL", "https://vedas.sac.gov.in/uva/index.html#app_id=visualization"))
         
         try:
             WebDriverWait(self.driver, wait).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "canvas, .ol-viewport"))
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#map canvas, .ol-viewport canvas"))
             )
-            time.sleep(min(5, wait - 3))
-        except Exception:
+            print("   ✅ Map canvas rendered. Waiting 3s for toolbar...")
+            time.sleep(3)
+        except Exception as e:
+            print(f"   ⚠️ Map wait failed: {e}. Waiting {wait}s anyway...")
             time.sleep(wait)
-        print("   ✅ Map ready")
 
     # ─────────────────────────────────────────────
-    # DIALOG CONTROLS
+    # 2. OPEN DIALOG (Waits for items to render)
     # ─────────────────────────────────────────────
     def _open_layer_dialog(self) -> bool:
-        js = """
-            var clicked = false;
-            document.querySelectorAll('button, mat-icon, div[role="button"]').forEach(btn => {
-                if (clicked) return;
-                var t = (btn.innerText || '').toLowerCase();
-                var tt = (btn.getAttribute('mattooltip') || btn.getAttribute('title') || '').toLowerCase();
-                if (t.includes('layer') || t.includes('search') || t.includes('add data') || tt.includes('layer') || tt.includes('search')) {
-                    btn.scrollIntoView({block: 'center'});
-                    btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                    clicked = true;
-                }
-            });
-            return clicked;
-        """
+        print("      [1/4] Opening Dialog...", end=" ")
         try:
-            if self.driver.execute_script(js):
-                time.sleep(2)
+            buttons = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Add Layer')]")
+            for btn in buttons:
+                try:
+                    if btn.is_displayed() and len(btn.text.strip()) < 30:
+                        btn.click()
+                        time.sleep(1.5)
+                        # DEBUG: Wait explicitly for the list items to exist inside dialog
+                        try:
+                            WebDriverWait(self.driver, 5).until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, "mat-dialog-container mat-list-item, mat-dialog-container li, mat-dialog-container [class*='item']"))
+                            )
+                            print("✅ (Items loaded)")
+                            return True
+                        except:
+                            print("⚠️ (Opened, but no list items found)")
+                            return True
+                except Exception as e:
+                    pass
+        except Exception as e:
+            print(f"[DEBUG] XPath error: {e}")
+
+        try:
+            clicked = self.driver.execute_script("""
+                var els = document.querySelectorAll('button, div, span, mat-icon');
+                for(var i=0; i<els.length; i++){
+                    var t = els[i].innerText.trim();
+                    if(t.includes('Add Layer') && t.length < 30 && els[i].offsetParent !== null){
+                        els[i].click(); return true;
+                    }
+                }
+                return false;
+            """)
+            if clicked:
+                time.sleep(1.5)
+                try:
+                    WebDriverWait(self.driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "mat-dialog-container mat-list-item"))
+                    )
+                except: pass
+                print("✅ (JS Fallback)")
                 return True
-        except: pass
+        except Exception as e:
+            print(f"[DEBUG] JS error: {e}")
+        
+        print("❌ Failed")
         return False
 
     def _close_layer_dialog(self):
-        js = """
-            document.querySelectorAll('button[aria-label="Close"], [class*="close-btn"], mat-dialog-close, [mat-dialog-close], button[class*="close"]').forEach(btn => {
-                if (btn.offsetParent !== null) btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-            });
-            document.querySelectorAll('.cdk-overlay-backdrop').forEach(bd => {
-                bd.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-            });
-        """
         try:
-            self.driver.execute_script(js)
-            time.sleep(1)
+            close_btns = self.driver.find_elements(By.CSS_SELECTOR, "button[aria-label='Close'], [mat-dialog-close], .mat-dialog-close")
+            for btn in close_btns:
+                if btn.is_displayed():
+                    btn.click()
+                    time.sleep(1)
+                    return
         except: pass
-
-    def _expand_dialog_category(self, cat_name: str):
-        js = """
-            var cat = arguments[0], done = false;
-            document.querySelectorAll('div, span, mat-expansion-panel-header, h3, h4, p, li').forEach(item => {
-                if (done) return;
-                if (item.innerText.trim().includes(cat) && item.innerText.trim().length < 100) {
-                    item.scrollIntoView({block: 'center'});
-                    item.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                    done = true;
-                }
-            });
-            return done;
-        """
-        try: return self.driver.execute_script(js, cat_name)
-        except: return False
-
-    def _click_dialog_layer(self, name: str) -> bool:
-        js = """
-            var n = arguments[0], ok = false;
-            document.querySelectorAll('div, span, mat-list-item, li, p, label').forEach(item => {
-                if (ok) return;
-                var t = item.innerText.trim();
-                if (t === n || t.startsWith(n + ' ') || t.startsWith(n + '[')) {
-                    item.scrollIntoView({block: 'center'});
-                    item.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                    ok = true;
-                }
-            });
-            return ok;
-        """
         try:
-            if self.driver.execute_script(js, name):
-                time.sleep(1)
-                return True
+            backdrops = self.driver.find_elements(By.CSS_SELECTOR, ".cdk-overlay-backdrop")
+            for bd in backdrops:
+                if bd.is_displayed(): bd.click()
         except: pass
-        return False
+        time.sleep(1)
 
     # ─────────────────────────────────────────────
-    # 🔥 SUB-DIALOG HANDLER (Crucial for VEDAS)
+    # 3. EXPAND CATEGORY (ONLY inside dialog)
     # ─────────────────────────────────────────────
-    def _handle_sub_dialog(self):
-        """
-        When you click a layer, VEDAS often opens a 2nd popup asking for Date/Pass.
-        This function automatically selects the first available date and clicks OK/Add.
-        """
-        time.sleep(1.5) # Wait for sub-popup to render
-        
-        js_handle = """
-            var handled = false;
+    def _expand_dialog_category(self, cat_name: str) -> bool:
+        js = """
+            var cat = arguments[0].toLowerCase();
+            var dialog = document.querySelector('mat-dialog-container');
+            if(!dialog) return false;
             
-            // 1. Try to click "OK", "Add", "Apply", "Submit" buttons
-            var buttons = document.querySelectorAll('button');
-            buttons.forEach(btn => {
-                if (handled) return;
-                var text = (btn.innerText || '').toLowerCase().trim();
-                if (text === 'ok' || text === 'add' || text === 'apply' || text === 'submit' || 
-                    text === 'add layer' || text === 'save' || text.includes('add data')) {
-                    if (btn.offsetParent !== null) {
-                        btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                        handled = true;
+            var headers = dialog.querySelectorAll('mat-expansion-panel-header, h3, h4, [class*="category"]');
+            for(var i=0; i<headers.length; i++){
+                var text = headers[i].innerText.toLowerCase();
+                if(text.includes(cat)){
+                    // DEBUG FIX: Only click if it's NOT already expanded
+                    var isExpanded = headers[i].getAttribute('aria-expanded');
+                    if(isExpanded !== 'true'){
+                        headers[i].click();
+                        return true; // Clicked to expand
                     }
-                }
-            });
-            
-            // 2. If no OK button, try clicking the first available Date/Mat-Option item
-            if (!handled) {
-                var options = document.querySelectorAll(
-                    'mat-option, [role="option"], [class*="date-item"], [class*="pass-item"], mat-list-item'
-                );
-                options.forEach(opt => {
-                    if (handled) return;
-                    if (opt.offsetParent !== null && opt.innerText.trim().length > 3) {
-                        opt.scrollIntoView({block: 'center'});
-                        opt.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                        handled = true; // Click first valid option
-                    }
-                });
-                
-                // If we clicked an option, try clicking OK again
-                if (handled) {
-                    setTimeout(() => {
-                        document.querySelectorAll('button').forEach(btn => {
-                            var text = (btn.innerText || '').toLowerCase().trim();
-                            if ((text === 'ok' || text === 'add' || text === 'apply') && btn.offsetParent !== null) {
-                                btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                            }
-                        });
-                    }, 500);
+                    return 'already_open'; // Already open, don't click
                 }
             }
-            return handled;
+            return false;
         """
         try:
-            return self.driver.execute_script(js_handle)
-        except:
+            result = self.driver.execute_script(js, cat_name)
+            if result == 'already_open':
+                return True
+            return bool(result)
+        except Exception as e:
+            print(f"\n      [DEBUG] Expand error for {cat_name}: {e}")
             return False
 
     # ─────────────────────────────────────────────
-    # DISCOVER LAYERS
+    # 4. CLICK LAYER (3-Tier Robust Match)
     # ─────────────────────────────────────────────
-    def discover_layers(self) -> List[str]:
-        print("\n🔍 Discovering layers...")
-        if not self._open_layer_dialog(): return []
-        
-        found = set()
-        try:
-            items = self.driver.execute_script("""
-                var t = [];
-                document.querySelectorAll('mat-dialog-container mat-list-item, mat-dialog-container li, mat-dialog-container [class*="item"]').forEach(i => {
-                    var txt = i.innerText.trim();
-                    if (txt.length > 3 && txt.length < 80) t.push(txt);
-                });
-                return [...new Set(t)];
-            """) or []
-            for i in items:
-                clean = self._clean_text(i)
-                if clean: found.add(clean)
-        except: pass
-
-        for l in VEDAS_KNOWN_LAYERS: found.add(l)
-        self.discovered_layers = sorted(list(found))
-        print(f"   📊 Found {len(self.discovered_layers)} layers")
-        self._close_layer_dialog()
-        return self.discovered_layers
-
-    def _clean_text(self, text):
-        if not text: return None
-        parts = text.replace("\n", " ").split()
-        clean = [p for p in parts if len(p) > 1]
-        res = " ".join(clean).strip()
-        return res if len(res) >= 3 else None
-
-    # ─────────────────────────────────────────────
-    # ACTIVATE LAYER (Full Flow: Dialog -> Sub-Dialog -> OK)
-    # ─────────────────────────────────────────────
-    def activate_layer(self, name: str) -> bool:
-        if not self._open_layer_dialog(): return False
-        time.sleep(1)
-        
-        if self._click_dialog_layer(name):
-            # 🔥 CRITICAL: Handle the Date/Pass sub-popup
-            self._handle_sub_dialog()
-            time.sleep(1)
-            
-            # Close main dialog
-            self._close_layer_dialog()
-            time.sleep(1)
-            return True
-        
-        # Fallback: Search categories
-        for cat, subcats in VEDAS_CATEGORIES.items():
-            self._expand_dialog_category(cat)
-            time.sleep(0.5)
-            for subcat in subcats:
-                self._expand_dialog_category(subcat)
-                time.sleep(0.3)
-                if self._click_dialog_layer(name):
-                    self._handle_sub_dialog()
-                    time.sleep(1)
-                    self._close_layer_dialog()
-                    return True
-        
-        self._close_layer_dialog()
-        return False
-
-    def deactivate_all(self):
-        js = """
-            document.querySelectorAll('[class*="layer-item"] button, [class*="active-layer"] button, button[mattooltip*="remove"], button[mattooltip*="Remove"]').forEach(btn => {
-                if (btn.offsetParent !== null) btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-            });
-            document.querySelectorAll('button, div[role="button"]').forEach(btn => {
-                var t = (btn.innerText || '').toLowerCase();
-                if (t.includes('clear all') || t.includes('remove all')) btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-            });
+    def _click_dialog_layer(self, name: str) -> bool:
+        # Tier 1: Exact JS click inside dialog
+        js_exact = """
+            var n = arguments[0];
+            var dialog = document.querySelector('mat-dialog-container');
+            if(!dialog) return false;
+            var items = dialog.querySelectorAll('mat-list-item, [class*="layer-item"], li, div');
+            for(var i=0; i<items.length; i++){
+                var t = items[i].innerText.trim();
+                if(t === n || t.startsWith(n + ' ') || t.startsWith(n + '[')){
+                    items[i].scrollIntoView({block: 'center'});
+                    items[i].dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                    return true;
+                }
+            }
+            return false;
         """
         try:
-            self.driver.execute_script(js)
-            time.sleep(0.5)
+            if self.driver.execute_script(js_exact, name):
+                time.sleep(1)
+                return True
         except: pass
 
+        # Tier 2: Loose JS match (handles extra text like "(Latest)")
+        js_loose = """
+            var n = arguments[0];
+            var dialog = document.querySelector('mat-dialog-container');
+            if(!dialog) return false;
+            var items = dialog.querySelectorAll('mat-list-item, [class*="layer-item"], li, div');
+            for(var i=0; i<items.length; i++){
+                var t = items[i].innerText.trim();
+                if(t.includes(n) && t.length < 100){
+                    items[i].scrollIntoView({block: 'center'});
+                    items[i].dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                    return true;
+                }
+            }
+            return false;
+        """
+        try:
+            if self.driver.execute_script(js_loose, name):
+                time.sleep(1)
+                return True
+        except: pass
+
+        # Tier 3: Selenium Click (Fallback for stubborn Angular)
+        try:
+            items = self.driver.find_elements(By.CSS_SELECTOR, "mat-dialog-container mat-list-item, mat-dialog-container li")
+            for item in items:
+                txt = item.text.strip()
+                if name in txt and item.is_displayed():
+                    ActionChains(self.driver).move_to_element(item).click().perform()
+                    time.sleep(1)
+                    return True
+        except: pass
+
+        return False
+
     # ─────────────────────────────────────────────
-    # WAIT FOR TILES TO RENDER
+    # 5. SUB-DIALOG (Angular Mat-Select Dates)
+    # ─────────────────────────────────────────────
+    def _handle_sub_dialog(self) -> bool:
+        print("      [3/4] Handling Date Popup...", end=" ")
+        time.sleep(2)
+        handled = False
+        
+        try:
+            selects = self.driver.find_elements(By.CSS_SELECTOR, "mat-form-field mat-select")
+            for select in selects:
+                try:
+                    if not select.is_displayed(): continue
+                    trigger = select.find_element(By.CSS_SELECTOR, ".mat-select-trigger")
+                    trigger.click()
+                    time.sleep(1)
+                    
+                    options = self.driver.find_elements(By.CSS_SELECTOR, "mat-option")
+                    for opt in options:
+                        if "mat-option-disabled" not in opt.get_attribute("class") and opt.is_displayed():
+                            opt.click()
+                            time.sleep(0.5)
+                            break
+                except Exception as e:
+                    print(f"[Select err] ", end="")
+            
+            time.sleep(0.5)
+            buttons = self.driver.find_elements(By.CSS_SELECTOR, "button")
+            for btn in buttons:
+                if btn.is_displayed() and btn.text.strip().lower() in ['ok', 'add', 'apply', 'save']:
+                    btn.click()
+                    time.sleep(1)
+                    handled = True
+                    break
+        except Exception as e:
+            print(f"[DEBUG] {e}", end=" ")
+            
+        print("✅" if handled else "⚠️ (No popup/OK)")
+        return handled
+
+    # ─────────────────────────────────────────────
+    # 6. TRIGGER DATA POPUP (Cut/Scissor Tool)
+    # ─────────────────────────────────────────────
+    def _trigger_data_popup(self):
+        print("      [5/6] Clicking Data Tool...", end=" ")
+        try:
+            tools = self.driver.find_elements(By.CSS_SELECTOR, "button, mat-icon, div[role='button']")
+            tool_clicked = False
+            
+            for tool in tools:
+                try:
+                    tooltip = (tool.get_attribute("mattooltip") or tool.get_attribute("title") or "").lower()
+                    text = (tool.text or "").lower()
+                    cls = (tool.get_attribute("class") or "").lower()
+                    
+                    if any(word in tooltip or word in text or word in cls 
+                           for word in ["cut", "scissor", "identify", "feature info", "info", "query"]):
+                        if "clear" not in text and "remove" not in text:
+                            tool.click()
+                            tool_clicked = True
+                            time.sleep(1)
+                            break
+                except: pass
+
+            if tool_clicked:
+                try:
+                    map_el = self.driver.find_element(By.CSS_SELECTOR, "#map, .ol-viewport, canvas")
+                    ActionChains(self.driver).move_to_element(map_el).click().perform()
+                    time.sleep(1)
+                    print("✅ Clicked Map")
+                except Exception as e:
+                    print(f"⚠️ Map click failed: {e}")
+            else:
+                print("⚠️ Tool not found")
+                
+        except Exception as e:
+            print(f"❌ {e}")
+
+    # ─────────────────────────────────────────────
+    # 7. WAIT FOR TILES
     # ─────────────────────────────────────────────
     def _wait_for_tiles(self, timeout=15):
         js = """
@@ -324,117 +347,159 @@ class YuvaMonitor:
             time.sleep(4)
 
     # ─────────────────────────────────────────────
-    # 🔥 CLEAN MAP IMAGE (Screenshots ONLY the map)
+    # 8. SAVE OUTPUT (Image + JSON)
     # ─────────────────────────────────────────────
-    def _screenshot(self, name, folder) -> Optional[str]:
-        path = self.output_base / folder
-        path.mkdir(parents=True, exist_ok=True)
-
-        filename = re.sub(r'[^a-zA-Z0-9]', '_', name)[:50]
-        filepath = path / f"{filename}_{int(time.time())}.png"
-
-        # Strategy 1: Screenshot ONLY the map element (Clean Image)
-        map_saved = False
-        try:
-            map_el = self.driver.find_element(By.CSS_SELECTOR, "#map, .ol-viewport, .map-container")
-            map_el.screenshot(str(filepath))
-            map_saved = True
-        except Exception:
-            pass
-
-        # Strategy 2: Fallback to full window if map element not found
-        if not map_saved:
-            self.driver.save_screenshot(str(filepath))
-
-        # Dedup check
-        try:
-            with open(filepath, "rb") as f:
-                h = hashlib.md5(f.read()).hexdigest()
-            if self._hash_cache.get(name) == h:
-                filepath.unlink()
-                print(f"      ⏭️  dup")
-                return None
-            self._hash_cache[name] = h
-        except: pass
-
-        print(f"      🖼️  {filepath.name}")
-        return str(filepath)
-
-    # ─────────────────────────────────────────────
-    # FRESHNESS CHECK (Scans dialog for > 10 days)
-    # ─────────────────────────────────────────────
-    def _parse_vedas_date(self, text: str) -> Tuple[Optional[datetime], Optional[int]]:
+    def _parse_date(self, text: str) -> Tuple[Optional[str], Optional[int]]:
         text = text.strip()
         for fmt in ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%B %Y", "%b %Y"]:
             try:
                 dt = datetime.strptime(text, fmt)
-                return dt, (datetime.now() - dt).days
+                return text, (datetime.now() - dt).days
             except ValueError: pass
         return None, None
 
-    def check_freshness(self, threshold=10):
-        print(f"\n📅 CHECKING DATA UPDATES (>{threshold} days = STALE)")
-        print("-" * 60)
-        
-        stale, fresh = [], []
-        seen = set()
+    def _save_output(self, layer_name: str, status: str) -> Optional[str]:
+        out_dir = self.output_base / "yuva_output"
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-        def process(src, raw):
-            if raw in seen: return
-            seen.add(raw)
-            dt, days = self._parse_vedas_date(raw)
-            if dt:
-                item = {"source": src, "date": raw, "days_old": days, "needs_update": days > threshold}
-                (stale if days > threshold else fresh).append(item)
+        ts = int(time.time())
+        safe_name = re.sub(r'[^a-zA-Z0-9]', '_', layer_name)[:50]
+        base_filename = f"{safe_name}_{ts}"
+        img_path = out_dir / f"{base_filename}.png"
+        json_path = out_dir / f"{base_filename}.json"
 
-        if self._open_layer_dialog():
-            time.sleep(2)
-            for cat in list(VEDAS_CATEGORIES.keys())[:4]:
-                self._expand_dialog_category(cat)
-                time.sleep(0.5)
-            
-            try:
-                regex = r"((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{2}-\d{2}-\d{4})"
-                items = self.driver.execute_script("""
-                    var t=[];
-                    document.querySelectorAll('mat-dialog-container mat-list-item, mat-dialog-container li, mat-dialog-container [class*="item"]').forEach(e=>t.push(e.innerText.trim()));
-                    return t;
-                """) or []
-                for txt in items:
-                    for d in re.findall(regex, txt, re.IGNORECASE):
-                        process(f"Dialog: {txt.split(chr(10))[0][:40]}", d)
-            except: pass
-            self._close_layer_dialog()
+        if status == "success":
+            self._trigger_data_popup()
+            print("      [6/6] Pausing for data panel (4s)...", end=" ")
+            time.sleep(4)
+            print("done")
 
-        print(f"   Total: {len(stale)+len(fresh)} | ✅ Fresh: {len(fresh)} | ⚠️ Stale: {len(stale)}")
-        if stale:
-            print(f"\n   🚨 NEEDS UPDATE - DATA OLDER THAN {threshold} DAYS:")
-            for s in stale: print(f"      ❌ {s['source']} -> {s['date']} ({s['days_old']}d old)")
-        else:
-            print("\n   ✅ All data is up to date!")
+        # Full Window Screenshot
+        self.driver.save_screenshot(str(img_path))
 
-        report = {"threshold": threshold, "stale_items": stale, "fresh_items": fresh, "time": datetime.now().isoformat()}
-        rpath = self.output_base / "freshness" / f"update_report_{int(time.time())}.json"
-        with open(rpath, "w") as f: json.dump(report, f, indent=2)
-        print(f"   💾 Saved: {rpath.name}")
-        return report
+        # Extract Text & Date
+        visible_data_text = ""
+        date_found, days_old = None, None
+        try:
+            visible_data_text = self.driver.find_element(By.TAG_NAME, "body").text
+            match = re.search(r"((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}|\d{4}-\d{2}-\d{2})", visible_data_text, re.IGNORECASE)
+            if match:
+                date_found, days_old = self._parse_date(match.group(1))
+        except: pass
+
+        metadata = {
+            "layer_name": layer_name,
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+            "source_url": self.cfg.get("TARGET_URL", ""),
+            "output_files": {"image": str(img_path.resolve()), "json": str(json_path.resolve())},
+            "data_check": {
+                "date_found": date_found,
+                "days_old": days_old,
+                "needs_update": True if (days_old is not None and days_old > 10) else False
+            },
+            "extracted_ui_text": visible_data_text[:1000]
+        }
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=4, ensure_ascii=False)
+
+        # Dedup
+        try:
+            with open(img_path, "rb") as f: h = hashlib.md5(f.read()).hexdigest()
+            if self._hash_cache.get(layer_name) == h:
+                img_path.unlink(); json_path.unlink()
+                print("      ⏭️  Exact duplicate skipped"); return None
+            self._hash_cache[layer_name] = h
+        except: pass
+
+        flag = " [⚠️ STALE >10d]" if metadata["data_check"]["needs_update"] else ""
+        print(f"      🖼️  {img_path.name} + .json{flag}")
+        return str(img_path)
 
     # ─────────────────────────────────────────────
-    # MODES
+    # 9. DISCOVER LAYERS
+    # ─────────────────────────────────────────────
+    def discover_layers(self) -> List[str]:
+        print("\n🔍 Discovering layers...")
+        if not self._open_layer_dialog(): return []
+        
+        found = set()
+        try:
+            items = self.driver.find_elements(By.CSS_SELECTOR, "mat-dialog-container mat-list-item, mat-dialog-container li, mat-dialog-container [class*='item']")
+            for i in items:
+                txt = i.text.strip()
+                if 3 < len(txt) < 80: found.add(txt)
+        except: pass
+
+        for l in VEDAS_KNOWN_LAYERS: found.add(l)
+        self.discovered_layers = sorted(list(found))
+        print(f"   📊 Found {len(self.discovered_layers)} layers")
+        self._close_layer_dialog()
+        return self.discovered_layers
+
+    # ─────────────────────────────────────────────
+    # 10. ACTIVATE LAYER (Full Flow + Debug)
+    # ─────────────────────────────────────────────
+    def activate_layer(self, name: str) -> bool:
+        if not self._open_layer_dialog():
+            print("         [DEBUG] Failed at step 1: Dialog didn't open.")
+            return False
+        
+        print(f"      [2/4] Searching for '{name}'...", end=" ")
+        
+        # Try direct click
+        if self._click_dialog_layer(name):
+            self._handle_sub_dialog()
+            self._close_layer_dialog()
+            time.sleep(1)
+            print("      ✅ Layer added successfully.")
+            return True
+        
+        print("Not found directly. Expanding categories...")
+        
+        # Fallback: Expand categories
+        for cat, subcats in VEDAS_CATEGORIES.items():
+            self._expand_dialog_category(cat)
+            time.sleep(0.5)
+            for subcat in subcats:
+                self._expand_dialog_category(subcat)
+                time.sleep(0.5)
+                if self._click_dialog_layer(name):
+                    self._handle_sub_dialog()
+                    self._close_layer_dialog()
+                    print(f"      ✅ Found in {cat} -> {subcat}")
+                    return True
+        
+        print(f"         [DEBUG] Failed at step 2: Layer '{name}' does not exist in dialog.")
+        self._close_layer_dialog()
+        return False
+
+    def deactivate_all(self):
+        try:
+            btns = self.driver.find_elements(By.CSS_SELECTOR, "[class*='layer-item'] button, button[mattooltip*='remove']")
+            for btn in btns:
+                if btn.is_displayed(): btn.click()
+        except: pass
+        time.sleep(0.5)
+
+    # ─────────────────────────────────────────────
+    # 11. MODES
     # ─────────────────────────────────────────────
     def screenshot_single_layers(self):
-        print("\n📸 SINGLE MODE (Adding layers & capturing map)")
-        targets = [l for l in self.discovered_layers if any(k in l.lower() for k in ["awifs", "sentinel", "liss", "ndvi", "fcc", "lulc", "water", "forest", "flood", "dem", "boundary", "sar", "cloud"])]
+        print("\n📸 SINGLE MODE")
+        targets = [l for l in self.discovered_layers if any(k in l.lower() for k in 
+            ["awifs", "sentinel", "liss", "ndvi", "fcc", "lulc", "water", "forest", "flood", "dem", "boundary", "sar", "cloud", "evi"])]
         if not targets: targets = self.discovered_layers[:10]
             
         for l in targets:
-            print(f"   ➕ {l}", end="")
+            print(f"\n   ➕ {l}")
             self.deactivate_all()
             if self.activate_layer(l):
                 self._wait_for_tiles(timeout=12)
-                self._screenshot(l, "single")
+                self._save_output(l, "success")
             else:
-                print(" ⚠️ skipped")
+                self._save_output(l, "failed_to_add")
 
     def screenshot_combined_by_category(self):
         print("\n📸 COMBINED MODE")
@@ -446,33 +511,41 @@ class YuvaMonitor:
             (["Forest Cover", "Forest Density"], "Forest_Combo"),
         ]
         for layers, label in combos:
-            print(f"   ➕ {label}", end="")
+            print(f"\n   ➕ {label} ({layers})")
             self.deactivate_all()
-            if any(self.activate_layer(l) for l in layers):
+            added = [l for l in layers if self.activate_layer(l)]
+            if added:
                 self._wait_for_tiles(timeout=15)
-                self._screenshot(label, "combined")
+                self._save_output(f"Combined_{label}", "success")
             else:
-                print(" ⚠️ skipped")
+                print("      ⚠️ Skipped (None could be added)")
 
     def screenshot_random_layers(self, count=3, iterations=5):
         print(f"\n📸 RANDOM MODE ({iterations}x{count})")
-        targets = [l for l in self.discovered_layers if any(k in l.lower() for k in ["awifs", "sentinel", "liss", "ndvi", "fcc", "lulc", "water", "forest", "flood", "dem", "boundary", "sar", "evi"])]
-        if len(targets) < 2: print("   ⚠️ Not enough layers"); return
+        targets = [l for l in self.discovered_layers if any(k in l.lower() for k in 
+            ["awifs", "sentinel", "liss", "ndvi", "fcc", "lulc", "water", "forest", "flood", "dem", "boundary", "sar", "evi"])]
+        if len(targets) < 2: 
+            print("   ⚠️ Not enough valid layers"); return
 
         for i in range(iterations):
             pick = random.sample(targets, min(count, len(targets)))
-            print(f"   🎲 #{i+1} {pick}", end="")
+            print(f"\n   🎲 #{i+1} {pick}")
             self.deactivate_all()
             for p in pick: self.activate_layer(p)
             self._wait_for_tiles(timeout=15)
-            self._screenshot(f"rand_{i}_{'_'.join(p[0].split()[:2])}", "random")
+            label = f"Random_{i}_{'_'.join(p[0].split()[:2])}"
+            self._save_output(label, "success")
+
+    def check_freshness(self, threshold=10):
+        print(f"\n📅 FRESHNESS: Automatically checked per layer (> {threshold} days = STALE)")
+        print("   (See 'needs_update' flag inside each generated .json file)")
 
     # ─────────────────────────────────────────────
-    # RUN ALL
+    # 12. RUN ALL
     # ─────────────────────────────────────────────
     def run_all(self):
         self.discover_layers()
-        self.check_freshness(threshold=10)
+        self.check_freshness()
         self.screenshot_single_layers()
         self.screenshot_combined_by_category()
         self.screenshot_random_layers()
